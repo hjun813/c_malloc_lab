@@ -55,7 +55,7 @@ void mem_reset_brk()
  *    by incr bytes and returns the start address of the new area. In
  *    this model, the heap cannot be shrunk.
  */
-void *mem_sbrk(int incr) 
+void *mem_sbrk(int incr) // 추가 힙 메모리 요청
 {
     char *old_brk = mem_brk;
 
