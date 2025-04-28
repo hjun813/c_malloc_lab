@@ -68,6 +68,7 @@ team_t team = {
 
 // heap_listp 힙 시작? 포인터 or 끝 가리키는 포인터
 static void *heap_listp = 0;
+static void *find_nextp = 0;
 static void place(void *bp, size_t asize);
 static void *find_fit(size_t asize);
 static void *extend_heap(size_t words);
@@ -87,6 +88,7 @@ int mm_init(void) // 힙 초기화 후 할당& 반환 요청 준비완
     PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1)); // 프롤로그풋터?
     PUT(heap_listp + (3*WSIZE), PACK(0, 1)); //에필로그 헤더
     heap_listp += (2*WSIZE); // 힙 영역이 시작할 곳,프롤로그 풋터 바로 다음 위치
+    find_nextp = heap_listp;
     // 빈 가용 리스트 만들고 초기화
 
     if(extend_heap(CHUNKSIZE/WSIZE) == NULL){ // 힙 늘려라
@@ -185,6 +187,7 @@ static void *coalesce(void *bp)
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     }
+    find_nextp = bp;
     return bp;
 }
 
@@ -211,12 +214,24 @@ void *mm_realloc(void *ptr, size_t size) //realloc
 static void *find_fit(size_t asize)  // 자리 찾기
 {
     void *bp;
+    bp = find_nextp;
 
-    for(bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)){
-        if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))){
-            return bp;
+    for (; GET_SIZE(HDRP(find_nextp)) > 0; find_nextp = NEXT_BLKP(find_nextp))
+    {
+        if (!GET_ALLOC(HDRP(find_nextp)) && (asize <= GET_SIZE(HDRP(find_nextp))))
+        {
+            return find_nextp;
         }
     }
+
+    for (find_nextp = heap_listp; find_nextp != bp; find_nextp = NEXT_BLKP(find_nextp))
+    { 
+        if (!GET_ALLOC(HDRP(find_nextp)) && (asize <= GET_SIZE(HDRP(find_nextp))))
+        {
+            return find_nextp;
+        }
+    }
+
     return NULL;
 }
 
