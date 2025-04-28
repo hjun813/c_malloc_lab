@@ -60,7 +60,9 @@ team_t team = {
 #define HDRP(bp) ((char *)(bp) - WSIZE) // 헤더 포인터 받아오기 (bp : 블록 포인터) (블록포인터 워드 사이즈만큼 전으로 이동)
 // 풋터 포인터 받아오기 (블록포인터를 블록 크기만큼 이동시키고 더블 워드만큼 전으로 이동)
 // 더블 워드 사이즈를 빼야함 (블록 사이즈는 헤더 + data + 풋터 다 포함 이니까)
-#define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE) 
+#define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+#define NEXT_FREERP(bp) (HDRP(bp) + WSIZE) // NEXT_FREE 포인터 위치
+#define PREV_FREERP(bp) (HDRP(bp) + DSIZE) // PREV_FREE 포인터 위치
 
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char*)(bp) - WSIZE))) // 다음 블록포인터 (블록 포인터 + 현재헤더보고 현재사이즈만큼 더하기)
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char*)(bp) - DSIZE))) // 이전 블록포인터 (블록 포인터 - 이전풋터보고 이전사이즈만큼 빼기)
@@ -68,6 +70,8 @@ team_t team = {
 
 // heap_listp 힙 시작? 포인터 or 끝 가리키는 포인터
 static void *heap_listp = 0;
+
+static void *last_freep = NULL; // free list의 마지막 시작 주소
 static void place(void *bp, size_t asize);
 static void *find_fit(size_t asize);
 static void *extend_heap(size_t words);
@@ -78,16 +82,17 @@ static void *coalesce(void *bp);
  */
 int mm_init(void) // 힙 초기화 후 할당& 반환 요청 준비완
 {
-    if((heap_listp = mem_sbrk(4*WSIZE)) == (void*)-1){ // 추가 힙 메모리 요청 (왜 4*WSIZE 이지?)
+    if((heap_listp = mem_sbrk(6*WSIZE)) == (void*) -1 ){ // 추가 힙 메모리 요청
         return -1; 
     }
 
     PUT(heap_listp, 0); // 정렬 패딩
-    PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1)); // 프롤로그헤더?
-    PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1)); // 프롤로그풋터?
-    PUT(heap_listp + (3*WSIZE), PACK(0, 1)); //에필로그 헤더
-    heap_listp += (2*WSIZE); // 힙 영역이 시작할 곳,프롤로그 풋터 바로 다음 위치
-    // 빈 가용 리스트 만들고 초기화
+    PUT(heap_listp + (1*WSIZE), PACK(2*DSIZE, 1)); // 프롤로그 헤더?
+    PUT(heap_listp + (2*WSIZE), NULL); // 프롤로그 NEXT FREE 
+    PUT(heap_listp + (3*WSIZE), NULL); // 프롤로그 PREV FREE
+    PUT(heap_listp + (4*WSIZE), PACK(2*DSIZE, 1)); // 프롤로그 풋터?
+    PUT(heap_listp + (5*WSIZE), PACK(0, 1)); //에필로그 헤더
+    heap_listp += (4*WSIZE); // 힙 영역이 시작할 곳,프롤로그 풋터 바로 다음 위치
 
     if(extend_heap(CHUNKSIZE/WSIZE) == NULL){ // 힙 늘려라
     // 힙 확장하고 초기 가용 블록 생성 
@@ -107,7 +112,10 @@ static void *extend_heap(size_t words) // size_t 는 문자열이나 메모리 �
         return NULL;
     }
 
+    last_freep = bp;
     PUT(HDRP(bp), PACK(size, 0)); // 헤더에다가 사이즈, notAlloc 저장
+    PUT(NEXT_FREERP(bp), NULL); 
+    PUT(PREV_FREERP(bp), NULL);
     PUT(FTRP(bp), PACK(size, 0)); // 풋터에다가 사이즈, notAlloc 저장
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0,1)); // 에필로그 헤더였구나
 
@@ -133,6 +141,7 @@ void *mm_malloc(size_t size)
         asize = DSIZE * ((size + (DSIZE) + (DSIZE -1)) / DSIZE); // 걍 크기 더블워드로 맞춰주기
     }
 
+    // asize는 패딩 한 크기이고
     if((bp = find_fit(asize)) != NULL){ // 빈공간 찾기
         place(bp, asize);
         return bp;
@@ -149,14 +158,17 @@ void *mm_malloc(size_t size)
 /*
  * mm_free - Freeing a block does nothing.
  */
-void mm_free(void *ptr) // ptr = bp 
+void mm_free(void *bp) // ptr = bp 
 {
-    size_t size = GET_SIZE(HDRP(ptr)); //헤더로부터 사이즈 받고
-
-    PUT(HDRP(ptr), PACK(size, 0));  // 헤더 
-    PUT(FTRP(ptr), PACK(size, 0));  // 풋터
-    coalesce(ptr); // 연결
-
+    size_t size = GET_SIZE(HDRP(bp)); //헤더로부터 사이즈 받고
+    
+    PUT(HDRP(bp), PACK(size, 0));  // 헤더
+    // PUT(NEXT_FREERP(bp), NULL); // next = 다음 블록의 next의 주소
+    // PUT(PREV_FREERP(bp), &(last_freep)); // prev = 이전 블록의 prev의 주소
+    // PUT(NEXT_FREERP(last_freep), &(bp)); // 이전꺼 next에 free된거 bp주소
+    PUT(FTRP(bp), PACK(size, 0));  // 풋터
+    coalesce(bp); // 연결
+    
 }
 
 static void *coalesce(void *bp)
@@ -166,11 +178,21 @@ static void *coalesce(void *bp)
     size_t size  = GET_SIZE(HDRP(bp)); // 현재 사이즈
 
     if(prev_alloc && next_alloc) { // 앞 뒤 다 할당
+        PUT(NEXT_FREERP(bp), NULL); // next = 다음 블록의 next의 주소
+        PUT(PREV_FREERP(bp), &(last_freep)); // prev = 이전 블록의 prev의 주소
+        PUT(NEXT_FREERP(last_freep), &(bp)); // 이전꺼 next에 free된거 bp주소
+        last_freep = bp;
         return bp;
     }
     else if(prev_alloc && !next_alloc){ // 앞 할당, 뒤 free
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp))); 
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        PUT(NEXT_FREERP(bp), *NEXT_FREERP(NEXT_BLKP(bp)));
+        PUT(PREV_FREERP(bp), *PREV_FREERP(NEXT_BLKP(bp))); // next, prev 옮기기
+        // PUT(NEXT_FREERP(), &(NEXT_FREERP(bp)));
+        // PUT(PREV_FREERP(), &(PREV_FREERP(bp)));
+
         PUT(HDRP(bp), PACK(size, 0));
+
         PUT(FTRP(bp), PACK(size, 0)); // 이거 해도 이전 풋터가 아닌 합친놈의 풋터가 나온다
     }
     else if(!prev_alloc && next_alloc){ // 앞 free, 뒤 할당
@@ -209,6 +231,7 @@ void *mm_realloc(void *ptr, size_t size) //realloc
 }
 
 static void *find_fit(size_t asize)  // 자리 찾기
+// explicit으로 구현 할꺼면 free_list 돌기
 {
     void *bp;
 
@@ -223,12 +246,16 @@ static void *find_fit(size_t asize)  // 자리 찾기
 static void place(void * bp, size_t asize) // 
 {
     size_t csize = GET_SIZE(HDRP(bp));
+    void* next_free = NEXT_FREERP(bp); // 다음 free 주소
+    void* prev_free = PREV_FREERP(bp); // 이전 free 주소
 
     if((csize - asize) >= (2*DSIZE)){ // 남는 공간이 더블비트 이상이면 쪼개고 할당
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
         bp = NEXT_BLKP(bp);
         PUT(HDRP(bp), PACK(csize-asize, 0));
+        PUT(NEXT_FREERP(bp), next_free);
+        PUT(PREV_FREERP(bp), prev_free);
         PUT(FTRP(bp), PACK(csize-asize, 0));
     } else {
         PUT(HDRP(bp), PACK(csize, 1));
