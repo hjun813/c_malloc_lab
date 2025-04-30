@@ -45,7 +45,7 @@ team_t team = {
 /*기본 상수 및 매크로 정리*/
 #define WSIZE 4
 #define DSIZE 8
-#define CHUNKSIZE (1<<12) //4KB
+#define CHUNKSIZE (1<<10) //4KB
 
 #define MAX(x, y) ((x) > (y) ? (x) : (y)) // 큰값 찾기
 
@@ -72,6 +72,7 @@ team_t team = {
 // heap_listp 힙 시작? 포인터 or 끝 가리키는 포인터
 static void *heap_listp = NULL;
 static void *root = NULL; // free 리스트 새로 된 block
+static void *lastp = NULL;
 
 static void place(void *bp, size_t asize);
 static void *find_fit(size_t asize);
@@ -175,80 +176,134 @@ void mm_free(void *ptr) // ptr = bp
     coalesce(ptr); // 연결
 
 }
-
 static void *coalesce(void *bp)
-{   
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); // 이전 블록 할당 여부
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp))); // 다음 블록 할당 여부
-    size_t size  = GET_SIZE(HDRP(bp)); // 현재 사이즈
-    // void *old_root = root;
+{
+    void *prev_bp = PREV_BLKP(bp);
+    void *next_bp = NEXT_BLKP(bp);
+    size_t prev_alloc = GET_ALLOC(FTRP(prev_bp));
+    size_t next_alloc = GET_ALLOC(HDRP(next_bp));
+    size_t size = GET_SIZE(HDRP(bp));
 
-    if(prev_alloc && next_alloc) { // 앞 뒤 다 할당
-        insert_freelist(bp);
-        return bp;
-    }
-    else if(prev_alloc && !next_alloc){ // 앞 할당, 뒤 free
-        remove_freelist(NEXT_BLKP(bp));
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp))); 
+    if (!prev_alloc && !next_alloc) {
+        remove_freelist(prev_bp);
+        remove_freelist(next_bp);
+        size += GET_SIZE(HDRP(prev_bp)) + GET_SIZE(HDRP(next_bp));
+        bp = prev_bp;
         PUT(HDRP(bp), PACK(size, 0));
-        PUT(FTRP(bp), PACK(size, 0)); // 이거 해도 이전 풋터가 아닌 합친놈의 풋터가 나온다
-        insert_freelist(bp);
+        PUT(FTRP(next_bp), PACK(size, 0));
     }
-    else if(!prev_alloc && next_alloc){ // 앞 free, 뒤 할당
-        remove_freelist(PREV_BLKP(bp));
-        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+    else if (!prev_alloc) {
+        remove_freelist(prev_bp);
+        size += GET_SIZE(HDRP(prev_bp));
+        bp = prev_bp;
+        PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp);
-        insert_freelist(bp);
     }
-    else{ // 둘 다 free
-        remove_freelist(PREV_BLKP(bp));
-        remove_freelist(NEXT_BLKP(bp));
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp);
-        insert_freelist(bp);
+    else if (!next_alloc) {
+        remove_freelist(next_bp);
+        size += GET_SIZE(HDRP(next_bp));
+        PUT(HDRP(bp), PACK(size, 0));
+        PUT(FTRP(bp), PACK(size, 0));
     }
+    else {
+        // no merging
+        PUT(HDRP(bp), PACK(size, 0));
+        PUT(FTRP(bp), PACK(size, 0));
+    }
+
+    insert_freelist(bp);
     return bp;
 }
+
 
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
-void *mm_realloc(void *ptr, size_t size) //realloc
-{
+void *mm_realloc(void *ptr, size_t size) {
     if (ptr == NULL)
-        return mm_malloc(size);
+        return mm_malloc(size); // 새로 할당
 
     if (size == 0) {
-        mm_free(ptr);
+        mm_free(ptr); // free 처리
         return NULL;
     }
 
+    size_t old_size = GET_SIZE(HDRP(ptr)); // 헤더 포함 전체 블록 크기
+    size_t copySize = old_size - DSIZE;    // payload 크기 (헤더+풋터 제외)
+    size_t asize = ALIGN(size + DSIZE);    // 요청 사이즈를 블록 단위로 정렬
+
+    // case 1: 요청 크기가 기존보다 작으면 그대로 사용 (필요시 split)
+    if (asize <= old_size) {
+        // split 할 정도로 크면 나눠주기
+        if (old_size - asize >= (4*DSIZE)) {
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+            void *next = NEXT_BLKP(ptr);
+            PUT(HDRP(next), PACK(old_size - asize, 0));
+            PUT(FTRP(next), PACK(old_size - asize, 0));
+            insert_freelist(next); // 새로 생긴 free block 등록
+        }
+        return ptr;
+    }
+
+    // case 2: 뒤 블록이 free이고 병합하면 충분한 경우
+    void *next = NEXT_BLKP(ptr);
+    if (!GET_ALLOC(HDRP(next))) {
+        size_t next_size = GET_SIZE(HDRP(next));
+        if (old_size + next_size >= asize) {
+            // 병합: 기존 + 뒤쪽 free block
+            remove_freelist(next);
+            size_t total_size = old_size + next_size;
+
+            PUT(HDRP(ptr), PACK(total_size, 1));
+            PUT(FTRP(ptr), PACK(total_size, 1));
+
+            // split 가능한 경우
+            if (total_size - asize >= (4*DSIZE)) {
+                PUT(HDRP(ptr), PACK(asize, 1));
+                PUT(FTRP(ptr), PACK(asize, 1));
+
+                void *split = NEXT_BLKP(ptr);
+                PUT(HDRP(split), PACK(total_size - asize, 0));
+                PUT(FTRP(split), PACK(total_size - asize, 0));
+                insert_freelist(split);
+            }
+
+            return ptr;
+        }
+    }
+
+    // case 3: 앞 블록이 free이고 병합하면 충분한 경우
+
+    // case 4: 새로 할당
     void *newptr = mm_malloc(size);
     if (newptr == NULL)
         return NULL;
 
-    size_t copySize = GET_SIZE(HDRP(ptr)) - DSIZE;
     if (size < copySize)
         copySize = size;
+
     memcpy(newptr, ptr, copySize);
     mm_free(ptr);
     return newptr;
 }
 
-static void *find_fit(size_t asize)  // 자리 찾기
-{
-    void *bp;
 
-    for(bp = root; bp != NULL; bp = NEXT_FREERP(bp)){
-        if(asize <= GET_SIZE(HDRP(bp))){
-            return bp;
+static void *find_fit(size_t asize) {
+    void *bp;
+    void *best_bp = NULL;
+    size_t best_size = (size_t)-1;
+
+    for (bp = root; bp != NULL; bp = NEXT_FREERP(bp)) {
+        size_t block_size = GET_SIZE(HDRP(bp));
+        if (block_size >= asize && (block_size - asize) < best_size) {
+            best_size = block_size - asize;
+            best_bp = bp;
+            if (best_size == 0) break; // perfect fit
         }
     }
-    return NULL;
+
+    return best_bp;
 }
 
 static void place(void * bp, size_t asize) // 
